@@ -59,8 +59,9 @@ See [installation](docs/INSTALL.md), [architecture](docs/ARCHITECTURE.md), and
 
 ## License and third-party components
 
-P4 Sentinel is licensed under **AGPL-3.0-only**; see [LICENSE](LICENSE). This
-license covers the original project files in this repository. The separately
+Copyright (C) 2026 Duv McIntyre. P4 Sentinel is licensed under
+**AGPL-3.0-only**; see [LICENSE](LICENSE). This license covers the original
+project files in this repository. The separately
 supplied `esp-rtl-sdr` component is also AGPL-3.0-only by default; see its
 [license terms](https://github.com/hardcoreerik/esp-rtl-sdr/blob/main/LICENSE)
 and [licensing notes](https://github.com/hardcoreerik/esp-rtl-sdr/blob/main/LICENSING.md)
