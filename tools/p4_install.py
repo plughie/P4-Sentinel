@@ -15,8 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SLOT_LIMITS = {"network": 0x200000, "rf": 0x400000, "controller": 0x400000}
-SLOT_OFFSETS = {"network": 0x120000, "rf": 0x320000, "controller": 0x720000}
+SLOT_LIMITS = {"sentinel": 0x600000, "controller": 0x400000}
+SLOT_OFFSETS = {"sentinel": 0x120000, "controller": 0x720000}
 MANIFEST_OFFSET = 0xB20000
 MANIFEST_BYTES = 0x1000
 FIXED_IMAGES = {
@@ -24,18 +24,20 @@ FIXED_IMAGES = {
     "partition_table": (0x8000, 0x1000),
     "ota_data": (0xF000, 0x2000),
     "chooser": (0x20000, 0x100000),
-    "network": (SLOT_OFFSETS["network"], SLOT_LIMITS["network"]),
-    "rf": (SLOT_OFFSETS["rf"], SLOT_LIMITS["rf"]),
+    "sentinel": (SLOT_OFFSETS["sentinel"], SLOT_LIMITS["sentinel"]),
     "controller": (SLOT_OFFSETS["controller"], SLOT_LIMITS["controller"]),
     "app_manifest": (MANIFEST_OFFSET, MANIFEST_BYTES),
 }
 PROFILES = {
-    "network": ("network",),
-    "rf": ("rf",),
-    "sentinel": ("network", "rf"),
+    "network": ("sentinel",),
+    "rf": ("sentinel",),
+    "sentinel": ("sentinel",),
     "controller": ("controller",),
-    "combined": ("network", "rf", "controller"),
+    "combined": ("sentinel", "controller"),
 }
+PROFILE_DEFAULT_SCENE = {"network": "network", "rf": "rf", "sentinel": "sentinel",
+                         "controller": "chooser", "combined": "sentinel"}
+SCENE_IDS = {"sentinel": 0, "network": 1, "rf": 2, "chooser": 0}
 BASE_IMAGES = (
     ("bootloader", 0x2000, "firmware/app_chooser/build_slots/bootloader/bootloader.bin"),
     ("partition_table", 0x8000, "firmware/app_chooser/build_slots/partition_table/partition-table.bin"),
@@ -78,13 +80,11 @@ def package(args: argparse.Namespace) -> None:
     env = os.environ.copy()
     if args.rtl_sdr_source:
         env["RTL_SDR_SOURCE"] = str(Path(args.rtl_sdr_source).expanduser().resolve())
-    if "rf" in apps and not env.get("RTL_SDR_SOURCE"):
+    if "sentinel" in apps and not env.get("RTL_SDR_SOURCE"):
         raise RuntimeError("RF Monitor needs RTL_SDR_SOURCE or --rtl-sdr-source")
 
     build_project("app_chooser", env)
-    if "network" in apps:
-        build_project("network_scanner", env)
-    if "rf" in apps:
+    if "sentinel" in apps:
         build_project("rf_monitor", env)
 
     out.mkdir(parents=True, exist_ok=True)
@@ -106,7 +106,7 @@ def package(args: argparse.Namespace) -> None:
             shutil.copy2(source, destination)
             source_entries.append((app, SLOT_OFFSETS[app], str(destination)))
             continue
-        source = ROOT / "firmware" / ("network_scanner" if app == "network" else "rf_monitor") / "build_slots" / ("network_scanner.bin" if app == "network" else "rf_monitor.bin")
+        source = ROOT / "firmware" / "rf_monitor" / "build_slots" / "rf_monitor.bin"
         if not source.is_file():
             raise RuntimeError(f"Built image not found: {source}")
         if source.stat().st_size > SLOT_LIMITS[app]:
@@ -128,10 +128,11 @@ def package(args: argparse.Namespace) -> None:
         entries.append({"name": label, "offset": offset, "file": f"images/{copied.name}",
                         "bytes": copied.stat().st_size, "sha256": sha256(copied)})
 
-    installed_bits = {"network": 1 << 0, "rf": 1 << 1, "controller": 1 << 2}
+    installed_bits = {"sentinel": 1 << 0, "controller": 1 << 1}
     mask = sum(installed_bits[app] for app in apps)
+    default_scene = PROFILE_DEFAULT_SCENE[args.profile]
     app_manifest = bytearray([0xFF]) * MANIFEST_BYTES
-    app_manifest[:8] = b"P4S1" + bytes((1, mask, 0, 0))
+    app_manifest[:8] = b"P4S1" + bytes((1, mask, SCENE_IDS[default_scene], 0))
     manifest_image = images_dir / "app_manifest.bin"
     manifest_image.write_bytes(app_manifest)
     entries.append({"name": "app_manifest", "offset": MANIFEST_OFFSET,
@@ -144,6 +145,7 @@ def package(args: argparse.Namespace) -> None:
         "flash_bytes": 16 * 1024 * 1024,
         "profile": args.profile,
         "apps": list(apps),
+        "default_scene": default_scene,
         "preserved_ranges": [{"start": 0x9000, "end": 0xF000, "name": "NVS"}],
         "entries": entries,
     }
@@ -193,7 +195,7 @@ def validate_package(package_dir: Path) -> list[dict]:
             raise RuntimeError(f"Image path is missing or escapes the package: {relative}")
         if path.stat().st_size != size or not re.fullmatch(r"[0-9a-f]{64}", entry.get("sha256", "")) or sha256(path) != entry["sha256"]:
             raise RuntimeError(f"Package image verification failed: {relative}")
-        if name in ("network", "rf", "controller", "chooser") and path.read_bytes()[:1] != b"\xE9":
+        if name in ("sentinel", "controller", "chooser") and path.read_bytes()[:1] != b"\xE9":
             raise RuntimeError(f"{name} does not have an ESP app image header")
         end = offset + size
         if end > 16 * 1024 * 1024:
@@ -207,8 +209,9 @@ def validate_package(package_dir: Path) -> list[dict]:
             raise RuntimeError(f"Package images overlap: {previous[2]} and {current[2]}")
     manifest_entry = next(entry for entry in entries if entry["name"] == "app_manifest")
     manifest_bytes = (package_dir / manifest_entry["file"]).read_bytes()
-    expected_mask = sum({"network": 1, "rf": 2, "controller": 4}[app] for app in PROFILES[profile])
-    if manifest_bytes[:8] != b"P4S1" + bytes((1, expected_mask, 0, 0)):
+    expected_mask = sum({"sentinel": 1, "controller": 2}[app] for app in PROFILES[profile])
+    default_scene = PROFILE_DEFAULT_SCENE[profile]
+    if manifest.get("default_scene") != default_scene or manifest_bytes[:8] != b"P4S1" + bytes((1, expected_mask, SCENE_IDS[default_scene], 0)):
         raise RuntimeError("Installed-app manifest contents do not match the package profile")
     return entries
 

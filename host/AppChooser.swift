@@ -6,16 +6,24 @@ private struct AppEvent: Decodable {
     var app: String?
     var code: Int?
     var request: UInt32?
+    var installed: InstalledApps?
+}
+
+private struct InstalledApps: Decodable {
+    var sentinel: Bool?
+    var controller: Bool?
 }
 
 @MainActor
 private final class ChooserConnection: ObservableObject {
-    enum Scene: String { case chooser, network, rf, controller }
+    enum Scene: String { case chooser, sentinel, network, rf, controller }
 
     @Published private(set) var scene = Scene.chooser
     @Published private(set) var ready = false
     @Published private(set) var busy = false
     @Published private(set) var status = "Connecting over USB…"
+    @Published private(set) var sentinelInstalled = false
+    @Published private(set) var controllerInstalled = false
     private(set) var scanner: Scanner?
     private(set) var monitor: RFMonitor?
 
@@ -92,8 +100,10 @@ private final class ChooserConnection: ObservableObject {
         guard process?.isRunning == true else { return }
         if target == .chooser {
             guard !busy || expected != .chooser else { return }
-        } else {
+        } else if target == .sentinel || target == .controller {
             guard !busy, ready, scene == .chooser else { return }
+        } else {
+            guard !busy, ready, scene == .sentinel || scene == .network || scene == .rf else { return }
         }
         let previous = expected ?? scene
         expected = target
@@ -105,6 +115,8 @@ private final class ChooserConnection: ObservableObject {
             status = "Stopping network scan…"
         case (.rf, .chooser):
             status = "Releasing tuner…"
+        case (_, .sentinel):
+            status = "Opening RF Sentinel…"
         case (_, .network):
             status = "Opening Network Scanner…"
         case (_, .rf):
@@ -131,7 +143,14 @@ private final class ChooserConnection: ObservableObject {
         }
         deadline = wait
         DispatchQueue.main.asyncAfter(deadline: .now() + 45, execute: wait)
-        let command = target == .chooser ? "apps back" : "apps \(target.rawValue)"
+        let command: String
+        if target == .chooser {
+            command = "apps back"
+        } else if (target == .sentinel || target == .controller) && scene == .chooser {
+            command = "apps \(target.rawValue)"
+        } else {
+            command = "apps mode \(target.rawValue)"
+        }
         send("\(command) \(sequence)")
     }
 
@@ -216,6 +235,13 @@ private final class ChooserConnection: ObservableObject {
         case .chooser:
             scanner = nil
             monitor = nil
+            if let installed = event.installed {
+                sentinelInstalled = installed.sentinel ?? false
+                controllerInstalled = installed.controller ?? false
+            }
+        case .sentinel:
+            scanner = nil
+            monitor = nil
         case .network:
             scanner = Scanner { [weak self] in self?.commandFromApp($0, scene: .network) }
         case .rf:
@@ -241,6 +267,11 @@ private struct ChooserView: View {
                         Label("Back to Apps", systemImage: "chevron.left")
                     }
                     .keyboardShortcut(.cancelAction)
+                    if board.scene == .network || board.scene == .rf {
+                        Button { board.open(.sentinel) } label: {
+                            Label("Sentinel Tools", systemImage: "square.grid.2x2")
+                        }
+                    }
                 } else {
                     Text("P4 Sentinel").font(.headline)
                 }
@@ -257,12 +288,19 @@ private struct ChooserView: View {
             case .chooser:
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Apps").font(.largeTitle.bold())
-                    appButton("Network Scanner", detail: "Wi-Fi and Bluetooth LE",
-                              icon: "wifi", scene: .network)
-                    appButton("RF Monitor", detail: "Receive-only RF tools",
-                              icon: "waveform", scene: .rf)
-                    appButton("Synesthesia Controller", detail: "Motion controller on device display",
-                              icon: "hand.draw", scene: .controller)
+                    appButton("RF Sentinel", detail: "Wi-Fi, Bluetooth LE, and receive-only RF",
+                              icon: "dot.radiowaves.left.and.right", scene: .sentinel,
+                              disabled: !board.sentinelInstalled)
+                    if board.controllerInstalled {
+                        appButton("Synesthesia Controller", detail: "Motion controller on device display",
+                                  icon: "hand.draw", scene: .controller)
+                    } else {
+                        Label("Synesthesia Controller · slot reserved", systemImage: "hand.draw")
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+                    }
                 }
                 .frame(maxWidth: 400)
                 .padding(28)
@@ -275,6 +313,19 @@ private struct ChooserView: View {
                 if let monitor = board.monitor {
                     RFView(monitor: monitor).disabled(board.busy || !board.ready)
                 }
+            case .sentinel:
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("RF Sentinel").font(.largeTitle.bold())
+                    Text("Choose a receive-only tool. Changing tools restarts into the same Sentinel slot.")
+                        .foregroundStyle(.secondary)
+                    appButton("Network Scanner", detail: "Wi-Fi and Bluetooth LE",
+                              icon: "wifi", scene: .network)
+                    appButton("RF Monitor", detail: "RTL-SDR receive-only detectors",
+                              icon: "waveform", scene: .rf)
+                }
+                .frame(maxWidth: 440)
+                .padding(28)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .controller:
                 VStack(spacing: 10) {
                     Image(systemName: "hand.draw").font(.system(size: 42)).foregroundStyle(.secondary)
@@ -293,7 +344,7 @@ private struct ChooserView: View {
     }
 
     private func appButton(_ name: String, detail: String, icon: String,
-                           scene: ChooserConnection.Scene) -> some View {
+                           scene: ChooserConnection.Scene, disabled: Bool = false) -> some View {
         Button { board.open(scene) } label: {
             HStack(spacing: 14) {
                 Image(systemName: icon).font(.title2).frame(width: 32)
@@ -309,7 +360,7 @@ private struct ChooserView: View {
         }
         .buttonStyle(.borderless)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
-        .disabled(board.busy || !board.ready)
+        .disabled(board.busy || !board.ready || disabled)
     }
 }
 

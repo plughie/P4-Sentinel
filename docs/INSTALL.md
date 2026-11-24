@@ -5,7 +5,7 @@
 - ESP-IDF 6.2 or newer configured for `esp32p4`.
 - Python 3.10 or newer, `pyserial`, and ESP-IDF's `esptool` environment.
 - For RF Monitor, a local checkout of `esp-rtl-sdr` and Espressif USB Host.
-- For controller packages, a P4 app image built for the `ota_2` partition and
+- For controller packages, a P4 app image built for the `ota_1` partition and
   the P4 Sentinel `apps back` / scene-event protocol.
 
 ## Package profiles
@@ -20,13 +20,17 @@ python3 tools/p4_install.py package --profile combined \
   --controller-image /path/to/controller.bin --out dist/combined
 ```
 
-`network` and `rf` include the chooser and one Sentinel app. `sentinel` includes
-the chooser and both Sentinel apps. `controller` and `combined` require a
-prebuilt controller image; this repository does not build Synesthesia firmware.
+`sentinel` includes the chooser and one combined RF Sentinel image. The
+`network` and `rf` profiles use that same image and start directly in the
+selected view. `controller` and `combined` require a prebuilt controller image;
+this repository does not build Synesthesia firmware. With `sentinel`, the
+controller partition is reserved in the partition table but remains blank and
+disabled in the chooser.
 
 Packages contain separate binaries and a human-readable address-based flash
 plan. They do not contain a padded all-flash image. Review `manifest.json`,
-`flash-plan.txt`, app sizes, and SHA-256 values before installation.
+`flash-plan.txt`, app sizes, and SHA-256 values before installation. Internal
+Network Scanner/RF Monitor view changes reboot into the same Sentinel partition.
 
 ## Flash
 

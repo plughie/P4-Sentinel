@@ -22,11 +22,15 @@ static size_t queue_read, queue_count;
 static bool input_overflow, back_pending;
 static uint32_t back_request;
 static uint8_t installed_apps;
+static uint8_t default_scene;
+static char boot_scene[16] = "sentinel";
+static bool mode_pending;
+static char pending_mode[16];
+static uint32_t mode_request;
 
 enum {
-    APP_INSTALLED_NETWORK = 1u << 0,
-    APP_INSTALLED_RF = 1u << 1,
-    APP_INSTALLED_CONTROLLER = 1u << 2,
+    APP_INSTALLED_SENTINEL = 1u << 0,
+    APP_INSTALLED_CONTROLLER = 1u << 1,
 };
 
 esp_err_t app_slots_init(void)
@@ -41,6 +45,7 @@ esp_err_t app_slots_init(void)
     if (result != ESP_OK) return result;
     if (memcmp(header, "P4S1", 4) != 0 || header[4] != 1) return ESP_ERR_INVALID_RESPONSE;
     installed_apps = header[5];
+    default_scene = header[6];
     return ESP_OK;
 }
 
@@ -60,8 +65,15 @@ static uint32_t parse_request(const char *value)
 
 void app_slots_report(const char *app, uint32_t request)
 {
-    printf("@APP {\"type\":\"scene\",\"app\":\"%s\",\"request\":%" PRIu32 "}\n",
-           app, request);
+    if (strcmp(app, "chooser") == 0) {
+        printf("@APP {\"type\":\"scene\",\"app\":\"chooser\",\"request\":%" PRIu32
+               ",\"installed\":{\"sentinel\":%s,\"controller\":%s}}\n",
+               request, (installed_apps & APP_INSTALLED_SENTINEL) ? "true" : "false",
+               (installed_apps & APP_INSTALLED_CONTROLLER) ? "true" : "false");
+    } else {
+        printf("@APP {\"type\":\"scene\",\"app\":\"%s\",\"request\":%" PRIu32 "}\n",
+               app, request);
+    }
     fflush(stdout);
 }
 
@@ -94,6 +106,60 @@ static uint32_t take_request(const char *app)
     return request;
 }
 
+const char *app_slots_boot_scene(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(NS, NVS_READONLY, &handle) == ESP_OK) {
+        char target[16] = {0};
+        size_t length = sizeof(target);
+        if (nvs_get_str(handle, "target", target, &length) == ESP_OK) {
+            nvs_close(handle);
+            if (strcmp(target, "network") == 0 || strcmp(target, "rf") == 0
+                || strcmp(target, "sentinel") == 0) {
+                snprintf(boot_scene, sizeof(boot_scene), "%s", target);
+                return boot_scene;
+            }
+        } else {
+            nvs_close(handle);
+        }
+    }
+    snprintf(boot_scene, sizeof(boot_scene), "%s",
+             default_scene == 1 ? "network" : default_scene == 2 ? "rf" : "sentinel");
+    return boot_scene;
+}
+
+bool app_slots_mode_pending(void)
+{
+    return mode_pending;
+}
+
+void app_slots_cancel_mode(void)
+{
+    mode_pending = false;
+    pending_mode[0] = '\0';
+    mode_request = 0;
+}
+
+esp_err_t app_slots_switch_mode(void)
+{
+    if (!mode_pending || (strcmp(pending_mode, "sentinel") != 0
+        && strcmp(pending_mode, "network") != 0 && strcmp(pending_mode, "rf") != 0)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    if (!partition) return ESP_ERR_NOT_FOUND;
+    esp_err_t result = persist_request(pending_mode, mode_request);
+    if (result != ESP_OK) return result;
+    result = esp_ota_set_boot_partition(partition);
+    if (result != ESP_OK) return result;
+    printf("@APP {\"type\":\"switching\",\"app\":\"%s\",\"request\":%" PRIu32 "}\n",
+           pending_mode, mode_request);
+    fflush(stdout);
+    esp_restart();
+    return ESP_OK;
+}
+
 void app_slots_announce(const char *app)
 {
     app_slots_report(app, take_request(app));
@@ -105,15 +171,11 @@ static const esp_partition_t *target_partition(const char *app)
         return esp_partition_find_first(ESP_PARTITION_TYPE_APP,
                                         ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
     }
-    if (strcmp(app, "network") == 0 && !(installed_apps & APP_INSTALLED_NETWORK)) return NULL;
-    if (strcmp(app, "rf") == 0 && !(installed_apps & APP_INSTALLED_RF)) return NULL;
+    if (strcmp(app, "sentinel") == 0 && !(installed_apps & APP_INSTALLED_SENTINEL)) return NULL;
     if (strcmp(app, "controller") == 0 && !(installed_apps & APP_INSTALLED_CONTROLLER)) return NULL;
-    if (strcmp(app, "network") == 0 || strcmp(app, "rf") == 0
-        || strcmp(app, "controller") == 0) {
-        const esp_partition_subtype_t subtype =
-            strcmp(app, "network") == 0 ? ESP_PARTITION_SUBTYPE_APP_OTA_0
-            : strcmp(app, "rf") == 0 ? ESP_PARTITION_SUBTYPE_APP_OTA_1
-            : ESP_PARTITION_SUBTYPE_APP_OTA_2;
+    if (strcmp(app, "sentinel") == 0 || strcmp(app, "controller") == 0) {
+        const esp_partition_subtype_t subtype = strcmp(app, "sentinel") == 0
+            ? ESP_PARTITION_SUBTYPE_APP_OTA_0 : ESP_PARTITION_SUBTYPE_APP_OTA_1;
         return esp_partition_find_first(ESP_PARTITION_TYPE_APP, subtype, NULL);
     }
     return NULL;
@@ -175,7 +237,11 @@ void app_slots_poll(void)
 bool apps_back_requested(void)
 {
     app_slots_poll();
-    return back_pending;
+    char line[SLOT_LINE_SIZE];
+    while (!back_pending && !mode_pending && app_slots_next_command(line, sizeof(line))) {
+        (void)app_slots_parse_command(line, running_app);
+    }
+    return back_pending || mode_pending;
 }
 
 bool app_slots_back_pending(void)
@@ -215,15 +281,31 @@ bool app_slots_parse_command(const char *line, const char *app)
         back_pending = true;
         return true;
     }
+    if (strncmp(line, "apps mode ", 10) == 0) {
+        const char *mode = line + 10;
+        const char *space = strchr(mode, ' ');
+        if (space) {
+            char requested[16] = {0};
+            const size_t length = (size_t)(space - mode);
+            if (length < sizeof(requested)) {
+                memcpy(requested, mode, length);
+                if ((strcmp(requested, "sentinel") == 0 || strcmp(requested, "network") == 0
+                     || strcmp(requested, "rf") == 0)
+                    && (strcmp(running_app, "sentinel") == 0
+                        || strcmp(running_app, "network") == 0 || strcmp(running_app, "rf") == 0)) {
+                    snprintf(pending_mode, sizeof(pending_mode), "%s", requested);
+                    mode_request = parse_request(space + 1);
+                    mode_pending = true;
+                }
+            }
+        }
+        return true;
+    }
     const char *target = NULL;
-    if (strncmp(line, "apps network", 12) == 0
-        && (line[12] == '\0' || line[12] == ' ')) {
-        target = "network";
-        value = line + 12;
-    } else if (strncmp(line, "apps rf", 7) == 0
-               && (line[7] == '\0' || line[7] == ' ')) {
-        target = "rf";
-        value = line + 7;
+    if (strncmp(line, "apps sentinel", 13) == 0
+        && (line[13] == '\0' || line[13] == ' ')) {
+        target = "sentinel";
+        value = line + 13;
     } else if (strncmp(line, "apps controller", 15) == 0
                && (line[15] == '\0' || line[15] == ' ')) {
         target = "controller";

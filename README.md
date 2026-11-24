@@ -2,12 +2,12 @@
 
 Receive-only network and RF observation software for an ESP32-P4 development
 board. It provides a USB app chooser, a Wi-Fi/Bluetooth LE Network Scanner, and
-an RTL-SDR RF Monitor. An optional Synesthesia controller image can share the
-board in its own boot slot.
+an RTL-SDR RF Monitor in one RF Sentinel application slot. A reserved second
+application slot is available for the separate Synesthesia controller.
 
 ## What is included
 
-- ESP-IDF firmware projects for the chooser, Network Scanner, and RF Monitor.
+- ESP-IDF firmware for a chooser and the combined RF Sentinel application.
 - A macOS USB host application for the chooser and live Network/RF views.
 - A packaging and installation tool that prepares selected app images and can
   install them separately or together on one P4.
@@ -27,7 +27,7 @@ board in its own boot slot.
 
 ## Build and package
 
-Use ESP-IDF 6.2 or newer with an ESP32-P4 toolchain. RF Monitor also requires
+Use ESP-IDF 6.2 or newer with an ESP32-P4 toolchain. RF Sentinel also requires
 the separately licensed `esp-rtl-sdr` receiver component and the Espressif USB
 Host component. Set `RTL_SDR_SOURCE` to a local receiver checkout.
 
@@ -38,7 +38,8 @@ python3 tools/p4_install.py package --profile combined \
 ```
 
 For a controller-only package, choose `--profile controller`. The controller
-firmware is maintained separately and is not included in this repository.
+firmware is maintained separately and is not included in this repository. The
+`sentinel` profile reserves a controller partition but leaves it empty.
 
 ## Install
 
