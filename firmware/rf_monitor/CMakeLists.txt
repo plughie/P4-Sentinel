@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.16)
+set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig" CACHE FILEPATH "RF Monitor configuration")
+set(EXTRA_COMPONENT_DIRS "../app_slots" "components/rtl_receiver")
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(rf_monitor)

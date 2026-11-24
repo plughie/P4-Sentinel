@@ -1,0 +1,5 @@
+/build/
+/build_slots/
+/managed_components/
+/sdkconfig
+/sdkconfig.old

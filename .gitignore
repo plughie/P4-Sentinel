@@ -1,0 +1,12 @@
+backups/
+dist/
+**/build/
+**/build_slots/
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+**/__pycache__/
+*.pyc
+*.bin
+*.elf
+*.map
