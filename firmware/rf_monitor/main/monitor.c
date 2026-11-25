@@ -61,6 +61,8 @@ static void adsb_emit_frame(const adsb_frame_t *frame);
 static void tetra_emit_candidate(uint32_t candidate_id, float strength_dbfs, bool new_candidate);
 static void p25_emit_nid(uint16_t nac, uint8_t duid, uint32_t valid_count);
 static void p25_emit_control_candidate(uint16_t nac, uint32_t repeated_count);
+static void p25_emit_tsbk(uint8_t opcode, uint8_t mfid, uint16_t nac, uint16_t channel,
+                          uint32_t frequency_hz, uint16_t talkgroup, bool last_block);
 static void pager_emit_address(uint32_t capcode, uint8_t function);
 static void pager_emit_message(uint32_t capcode, uint8_t function, const char *text);
 static void audio_emit_block(const int8_t *samples, size_t count);
@@ -602,6 +604,7 @@ static esp_err_t start_p25_capture(uint32_t hz)
     p25_decoder_reset();
     p25_decoder_set_callback(p25_emit_nid);
     p25_decoder_set_control_callback(p25_emit_control_candidate);
+    p25_decoder_set_tsbk_callback(p25_emit_tsbk);
     rf_iq_pipeline_set_consumer(p25_decoder_consume);
     p25_capture = true;
     iq_capture = adsb_capture = tetra_capture = false;
@@ -822,6 +825,27 @@ static void p25_emit_control_candidate(uint16_t nac, uint32_t repeated_count)
     printf("@RF {\"type\":\"p25_control_candidate\",\"center\":%" PRIu32
            ",\"nac\":%u,\"repeated_nids\":%" PRIu32 "}\n",
            center_hz, (unsigned)nac, repeated_count);
+    fflush(stdout);
+}
+
+static void p25_emit_tsbk(uint8_t opcode, uint8_t mfid, uint16_t nac, uint16_t channel,
+                          uint32_t frequency_hz, uint16_t talkgroup, bool last_block)
+{
+    (void)mfid;
+    if (!channel) return;
+    if (frequency_hz) {
+        printf("@RF {\"type\":\"p25_grant\",\"center\":%" PRIu32
+               ",\"nac\":%u,\"opcode\":%u,\"channel\":%u,\"frequency\":%" PRIu32
+               ",\"talkgroup\":%u,\"last_block\":%s}\n", center_hz,
+               (unsigned)nac, (unsigned)opcode, (unsigned)channel, frequency_hz,
+               (unsigned)talkgroup, last_block ? "true" : "false");
+    } else {
+        printf("@RF {\"type\":\"p25_grant\",\"center\":%" PRIu32
+               ",\"nac\":%u,\"opcode\":%u,\"channel\":%u,\"frequency\":null"
+               ",\"talkgroup\":%u,\"last_block\":%s}\n", center_hz,
+               (unsigned)nac, (unsigned)opcode, (unsigned)channel,
+               (unsigned)talkgroup, last_block ? "true" : "false");
+    }
     fflush(stdout);
 }
 

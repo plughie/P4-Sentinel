@@ -33,6 +33,10 @@ private struct RFEvent: Decodable {
     var control_nids: UInt32?
     var control_nac: Int?
     var repeated_nids: UInt32?
+    var opcode: Int?
+    var channel: Int?
+    var talkgroup: Int?
+    var last_block: Bool?
     var pcm: String?
     var codec: String?
     var demod_samples: UInt64?
@@ -244,6 +248,17 @@ struct P25ControlCandidate: Identifiable {
     var id: String { "\(nac)-\(centerHz)" }
 }
 
+struct P25GrantObservation: Identifiable {
+    let frequencyHz: Int?
+    let controlHz: Int
+    let nac: Int
+    let opcode: Int
+    let channel: Int
+    let talkgroup: Int?
+    var lastSeen: Date
+    var id: String { "\(nac)-\(controlHz)-\(channel)-\(talkgroup ?? 0)" }
+}
+
 struct TPMSObservation: Identifiable {
     let id: String
     let flags: Int
@@ -317,6 +332,7 @@ final class RFMonitor: ObservableObject {
     @Published private(set) var p25Observations: [P25NIDObservation] = []
     @Published private(set) var p25ControlCandidates: [P25ControlCandidate] = []
     @Published private(set) var p25ValidNIDs: UInt32 = 0
+    @Published private(set) var p25Grants: [P25GrantObservation] = []
     @Published private(set) var audioBlocksReceived = 0
     @Published private(set) var audioSamplesReceived: UInt64 = 0
     @Published private(set) var audioDroppedSamples: UInt64 = 0
@@ -552,7 +568,7 @@ final class RFMonitor: ObservableObject {
         self.threshold = threshold
         sampleRate = mode == .iq || mode == .tetra || mode == .p25 || mode == .audio || mode == .tpms ? 250_000 : mode == .adsb ? 2_048_000 : 960_000
         center = mode == .activity ? bank.tunerCenter : mode == .adsb ? 1_090_000_000 : frequency
-        self.p25ScanFrequencies = mode == .p25 ? p25ScanFrequencies : nil
+        self.p25ScanFrequencies = mode == .p25 ? p25ScanFrequencies.flatMap { $0.isEmpty ? nil : $0 } : nil
         p25ScanIndex = 0
         shownCenter = center
         signals = []
@@ -580,6 +596,7 @@ final class RFMonitor: ObservableObject {
             p25Observations = []
             p25ControlCandidates = []
             p25ValidNIDs = 0
+            p25Grants = []
             iqSamples = 0
             iqDroppedSamples = 0
             iqElapsedMilliseconds = 0
@@ -710,15 +727,6 @@ final class RFMonitor: ObservableObject {
             if let frequencies = p25ScanFrequencies, !frequencies.isEmpty {
                 center = frequencies[p25ScanIndex]
                 status = "Scanning local P25 control frequencies · \(p25ScanIndex + 1) of \(frequencies.count) · \(Self.mhz(center)) MHz"
-                let scanRun = runID
-                let dwell = DispatchWorkItem { [weak self] in
-                    guard let self, self.running, self.mode == .p25,
-                          self.runID == scanRun, self.p25ScanFrequencies != nil else { return }
-                    self.send("stop")
-                }
-                p25DwellTask?.cancel()
-                p25DwellTask = dwell
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: dwell)
             } else {
                 status = "Listening for valid P25 network IDs at \(Self.mhz(center)) MHz…"
             }
@@ -923,6 +931,17 @@ final class RFMonitor: ObservableObject {
             if let rate = event.rate { sampleRate = rate }
             if let center = event.center { shownCenter = center }
             status = "Listening · No valid P25 network IDs yet"
+            if p25ScanFrequencies != nil {
+                let scanRun = runID
+                let dwell = DispatchWorkItem { [weak self] in
+                    guard let self, self.running, self.mode == .p25,
+                          self.runID == scanRun, self.p25ScanFrequencies != nil else { return }
+                    self.send("stop")
+                }
+                p25DwellTask?.cancel()
+                p25DwellTask = dwell
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: dwell)
+            }
         case "audio_started":
             timeout?.cancel()
             if let rate = event.rate { sampleRate = rate }
@@ -1070,6 +1089,23 @@ final class RFMonitor: ObservableObject {
             }
             if p25ControlCandidates.count > 16 { p25ControlCandidates.removeLast() }
             status = "P25 control-channel candidate · NAC \(String(format: "%03X", nac)) · TSBK not validated"
+            lastUpdated = Date()
+        case "p25_grant":
+            guard running, let nac = event.nac, let opcode = event.opcode, let channel = event.channel else { return }
+            let control = event.center ?? shownCenter
+            let decodedFrequency = event.frequency.flatMap { $0 > 0 ? $0 : nil }
+            let grant = P25GrantObservation(frequencyHz: decodedFrequency, controlHz: control, nac: nac,
+                                            opcode: opcode, channel: channel,
+                                            talkgroup: event.talkgroup == 0 ? nil : event.talkgroup,
+                                            lastSeen: Date())
+            if let index = p25Grants.firstIndex(where: { $0.id == grant.id }) {
+                p25Grants[index] = grant
+            } else {
+                p25Grants.insert(grant, at: 0)
+            }
+            p25Grants.sort { $0.lastSeen > $1.lastSeen }
+            if p25Grants.count > 40 { p25Grants.removeLast(p25Grants.count - 40) }
+            status = "CRC-valid P25 channel assignment · \(decodedFrequency.map { Self.mhz($0) + " MHz" } ?? "channel \(channel)") · NAC \(String(format: "%03X", nac))"
             lastUpdated = Date()
         case "tetra_candidate", "tetra_strength":
             guard let candidate = event.candidate_id, let strength = event.strength_dbfs else { return }
@@ -1292,20 +1328,52 @@ private enum TetraBand: String, CaseIterable {
 }
 
 private enum P25Band: String, CaseIterable {
-    case vhf = "VHF · 154 MHz"
-    case uhf = "UHF · 460 MHz"
-    case sevenHundred = "700 MHz · 770 MHz"
-    case eightHundred = "800 MHz · 851 MHz"
+    case route = "San Mateo → South Lake Tahoe"
+    case sanMateo = "San Mateo County"
+    case contraCosta = "Contra Costa County"
+    case alameda = "Alameda County"
+    case sacramento = "Sacramento County"
+    case elDorado = "El Dorado County"
+    case tahoe = "Tahoe Basin"
+    case manual = "Manual · 770 MHz"
 
-    var centerHz: Int {
+    var scanFrequencies: [Int] {
         switch self {
-        case .vhf: 154_000_000
-        case .uhf: 460_000_000
-        case .sevenHundred: 770_000_000
-        case .eightHundred: 851_000_000
+        case .route:
+            // Published CC candidates for the Bay Area → Sacramento → US-50 corridor.
+            // Keep this set compact enough to cycle during a road trip.
+            [772_031_250, 772_106_250, 772_256_250, 772_406_250, 772_706_250, 772_781_250, 773_406_250, 773_481_250,
+             773_968_750, 774_631_250, 774_706_250,
+             770_206_250, 770_943_750, 773_543_750, 773_818_750, 770_443_750, 773_068_750, 773_568_750, 774_056_250,
+             773_906_250, 774_181_250, 774_456_250, 774_731_250, 853_287_500, 853_300_000, 853_737_500, 853_750_000,
+             771_943_750, 772_243_750, 772_543_750, 772_843_750,
+             769_206_250, 770_906_250, 773_318_750, 774_068_750, 770_156_250, 770_456_250, 770_706_250, 773_043_750,
+             769_406_250, 770_656_250, 773_306_250, 773_593_750,
+             151_197_500, 151_452_500, 152_142_500, 152_157_500, 161_837_500, 152_052_500, 152_067_500, 152_127_500]
+        case .sanMateo:
+            [772_031_250, 772_406_250, 772_706_250, 773_481_250,
+             771_356_250, 772_256_250, 773_968_750, 774_631_250, 772_106_250, 772_781_250, 773_406_250, 774_706_250,
+             772_181_250, 772_631_250, 772_931_250, 773_881_250]
+        case .contraCosta:
+            [770_443_750, 773_068_750, 773_568_750, 774_056_250,
+             773_906_250, 774_181_250, 774_456_250, 774_731_250,
+             853_287_500, 853_300_000, 853_737_500, 853_750_000]
+        case .alameda:
+            [770_206_250, 770_943_750, 773_543_750, 773_818_750,
+             771_943_750, 772_243_750, 772_543_750, 772_843_750,
+             772_768_750, 773_668_750, 774_143_750, 774_893_750]
+        case .sacramento:
+            [769_206_250, 770_906_250, 773_318_750, 774_068_750,
+             770_156_250, 770_456_250, 770_706_250, 773_043_750,
+             770_206_250, 770_943_750, 773_543_750, 773_818_750]
+        case .elDorado:
+            [769_406_250, 770_656_250, 773_306_250, 773_593_750]
+        case .tahoe:
+            [151_197_500, 151_452_500, 152_142_500, 152_157_500, 161_837_500, 152_052_500, 152_067_500, 152_127_500]
+        case .manual: []
         }
     }
-
+    var centerHz: Int { scanFrequencies.first ?? 770_000_000 }
 }
 
 private enum GMRSChannel: Int, CaseIterable, Identifiable {
@@ -1435,7 +1503,7 @@ struct RFView: View {
     @State private var frequency = "98.0"
     @State private var bank = ChannelBank.frs462
     @State private var tetraBand = TetraBand.low
-    @State private var p25Band = P25Band.vhf
+    @State private var p25Band = P25Band.route
     @State private var gmrsChannel = GMRSChannel.ch1
     @State private var tpmsBand = TPMSBand.northAmerica
     @State private var threshold = 6
@@ -1449,6 +1517,11 @@ struct RFView: View {
 
     private var requested: Int? {
         guard let value = Double(frequency), (87.5...468.5).contains(value) else { return nil }
+        return Int((value * 1e6).rounded())
+    }
+
+    private var p25ManualCenter: Int? {
+        guard let value = Double(frequency), (24.0...1766.0).contains(value) else { return nil }
         return Int((value * 1e6).rounded())
     }
 
@@ -1506,13 +1579,14 @@ struct RFView: View {
                     if monitor.running { monitor.stop() }
                     else {
                         selectedPeak = nil
-                        monitor.start(mode, frequency: tetra ? tetraBand.centerHz : p25 ? p25Band.centerHz : audio ? gmrsChannel.frequencyHz : tpms ? tpmsBand.centerHz : requested ?? 98_000_000, bank: bank,
+                        monitor.start(mode, frequency: tetra ? tetraBand.centerHz : p25 ? (p25Band == .manual ? p25ManualCenter ?? p25Band.centerHz : p25Band.centerHz) : audio ? gmrsChannel.frequencyHz : tpms ? tpmsBand.centerHz : requested ?? 98_000_000, bank: bank,
                                       threshold: Double(threshold), p25ScanFrequencies: p25Band.scanFrequencies)
                     }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!monitor.ready || monitor.stopping
-                          || ((mode == .tune || mode == .iq || finder) && requested == nil && !monitor.running))
+                          || ((mode == .tune || mode == .iq || finder) && requested == nil && !monitor.running)
+                          || (p25 && p25Band == .manual && p25ManualCenter == nil && !monitor.running))
             }
             sdCardStatus
             HStack {
@@ -1528,11 +1602,17 @@ struct RFView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                 } else if p25 {
-                    Picker("P25 band", selection: $p25Band) {
+                    Picker("P25 scan plan", selection: $p25Band) {
                         ForEach(P25Band.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }.fixedSize().disabled(monitor.running || monitor.stopping)
-                    Text("250 kHz slice · 250 kS/s · receive-only")
+                    Text(p25Band.scanFrequencies.isEmpty ? "250 kHz slice · manual tuning · receive-only" : "\(p25Band.scanFrequencies.count) control-channel candidates · 250 kS/s · receive-only")
                         .foregroundStyle(.secondary)
+                    Text("Area selected manually · no GPS required")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    if p25Band == .manual {
+                        TextField("MHz", text: $frequency).frame(width: 95).disabled(monitor.running)
+                        Text("MHz")
+                    }
                     Spacer()
                 } else if audio {
                     Picker("GMRS channel", selection: $gmrsChannel) {
@@ -1616,7 +1696,7 @@ struct RFView: View {
             }.font(.callout)
             Text(adsb ? "Locally received broadcast data · Address and callsign are not independently verified"
                  : tetra ? "Energy-rise candidates only · TETRA is not decoded · dBFS is relative level, not distance or bearing"
-                 : p25 ? "Valid BCH network identifier only · No control-channel or talkgroup claim · No voice/audio decoding"
+                 : p25 ? "P25 control-channel grants and assigned-frequency activity · Receive-only · No voice/audio decoding"
                  : audio ? "Live analog FM receiver audio through Mac speakers · No audio is recorded or saved"
                  : tpms ? "Schrader-family packet decoder only · CRC checked · other sensor protocols may be present but unsupported"
                  : finder ? "A new energy rise near the chosen center only · no signal identity, distance, or direction · approximately 1.9 kHz bins"
@@ -1857,9 +1937,10 @@ struct RFView: View {
         HStack(spacing: 18) {
             metric("Valid network IDs", value: "\(monitor.p25ValidNIDs)")
             metric("Control candidates", value: "\(monitor.p25ControlCandidates.count)")
+            metric("Channel assignments", value: "\(monitor.p25Grants.count)")
             metric("Sample rate", value: "\(monitor.sampleRate / 1000) kS/s")
             metric("Dropped samples", value: "\(monitor.iqDroppedSamples)")
-            metric("Center", value: "\(RFMonitor.mhz(monitor.running ? monitor.shownCenter : p25Band.centerHz)) MHz")
+            metric("Center", value: "\(RFMonitor.mhz(monitor.running ? monitor.shownCenter : p25Band == .manual ? p25ManualCenter ?? p25Band.centerHz : p25Band.centerHz)) MHz")
         }
         .padding(10)
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
@@ -1867,9 +1948,24 @@ struct RFView: View {
 
     private var p25Readings: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("P25 receive evidence").font(.headline)
-            Text("A candidate means repeated BCH/parity-valid control-format headers at this tuning. Trunking messages and talkgroups are not decoded yet.")
+            Text("P25 activity evidence").font(.headline)
+            Text("CRC-valid control-channel assignments identify channels the system assigned. This monitor does not retune to verify voice occupancy or decode audio.")
                 .font(.caption).foregroundStyle(.secondary)
+            if !monitor.p25Grants.isEmpty {
+                Text("Recent channel assignments").font(.subheadline)
+                ForEach(monitor.p25Grants) { row in
+                    HStack {
+                        Label("Assigned channel", systemImage: "dot.radiowaves.left.and.right")
+                        Text(row.frequencyHz.map { "\(RFMonitor.mhz($0)) MHz" } ?? "Channel 0x\(String(format: "%04X", row.channel)) · frequency unresolved")
+                            .font(.callout.monospacedDigit())
+                        if let talkgroup = row.talkgroup { Text("TG \(talkgroup)").font(.caption.monospaced()) }
+                        Spacer()
+                        Text("NAC \(String(format: "%03X", row.nac)) · CC \(RFMonitor.mhz(row.controlHz))")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    .padding(7).background(Color.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 5))
+                }
+            }
             if !monitor.p25ControlCandidates.isEmpty {
                 ForEach(monitor.p25ControlCandidates) { row in
                     HStack {

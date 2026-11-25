@@ -15,6 +15,11 @@ application slot is available for the separate Synesthesia controller.
   and analog FM observations. Each detector reports only the evidence it can
   validate; candidates are not verified identities.
 
+See [docs/P25.md](docs/P25.md) for the P25 activity decoder and the San Mateo
+County to South Lake Tahoe control-channel candidate plan. P25 voice decoding
+is intentionally out of scope; validated channel grants are shown as activity
+evidence while the receiver stays on the control channel.
+
 ## Credits
 
 - **P4 Sentinel:** Inspired by [RF Sentinel](https://github.com/CIS-C0/RFSentinel)
