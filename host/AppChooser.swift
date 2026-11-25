@@ -33,6 +33,7 @@ private final class ChooserConnection: ObservableObject {
     private var pending = Data()
     private var expected: Scene?
     private var expectingStatus = false
+    private var launchRFMonitor = false
     private var sequence = UInt32.random(in: 1...1_000_000_000)
     private var deadline: DispatchWorkItem?
     private let decoder = JSONDecoder()
@@ -44,6 +45,7 @@ private final class ChooserConnection: ObservableObject {
             status = "Launch with open-scanner.sh --apps"
             return
         }
+        launchRFMonitor = config.initialScene == Scene.rf.rawValue
 
         let bridge = Process()
         let output = Pipe()
@@ -86,6 +88,7 @@ private final class ChooserConnection: ObservableObject {
 
     func returnToChooser() {
         if process?.isRunning == true {
+            launchRFMonitor = false
             open(.chooser)
         } else {
             output?.fileHandleForReading.readabilityHandler = nil
@@ -139,6 +142,7 @@ private final class ChooserConnection: ObservableObject {
             self.busy = false
             self.ready = false
             self.expected = nil
+            self.launchRFMonitor = false
             self.status = "The board did not confirm the switch."
         }
         deadline = wait
@@ -223,6 +227,7 @@ private final class ChooserConnection: ObservableObject {
             expected = nil
             expectingStatus = false
             busy = false
+            launchRFMonitor = false
             status = "The board could not switch apps (\(event.code ?? 0))."
             return
         }
@@ -253,6 +258,17 @@ private final class ChooserConnection: ObservableObject {
         busy = false
         status = "ESP32-P4 · USB"
         scene = next
+        if launchRFMonitor {
+            switch next {
+            case .chooser where sentinelInstalled:
+                open(.sentinel)
+            case .sentinel, .network:
+                launchRFMonitor = false
+                open(.rf)
+            default:
+                launchRFMonitor = false
+            }
+        }
     }
 }
 

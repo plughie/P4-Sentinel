@@ -4,11 +4,13 @@ set -eu
 app_name="Network Scanner"
 app_id="network-scanner"
 app_source="ScannerWindow.swift"
+initial_scene=""
 case "${1:-}" in
     --rf)
         app_name="RF Monitor"
         app_id="rf-monitor"
-        app_source="RFMonitor.swift"
+        app_source="AppChooser.swift"
+        initial_scene="rf"
         shift
         ;;
     --apps)
@@ -44,9 +46,9 @@ cat > "$build_dir/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-"$python" -c 'import json, sys; json.dump(dict(zip(("python", "bridge", "port"), sys.argv[1:])), sys.stdout)' \
-    "$python" "$host_dir/network_scan.py" "$1" > "$build_dir/serial-config.json"
-if [ "$app_id" = "app-chooser" ]; then
+"$python" -c 'import json, sys; json.dump(dict(zip(("python", "bridge", "port", "initialScene"), sys.argv[1:])), sys.stdout)' \
+    "$python" "$host_dir/network_scan.py" "$1" "$initial_scene" > "$build_dir/serial-config.json"
+if [ "$app_source" = "AppChooser.swift" ]; then
     swiftc -parse-as-library -D APP_CHOOSER "$host_dir/AppChooser.swift" \
         "$host_dir/ScannerWindow.swift" "$host_dir/FlockDetector.swift" \
         "$host_dir/BodyCameraDetector.swift" "$host_dir/PublicSafetyDetector.swift" \
@@ -59,9 +61,6 @@ if [ "$app_id" = "app-chooser" ]; then
         "$host_dir/SignalStrengthHistory.swift" "$host_dir/WiFiChannelActivity.swift" \
         "$host_dir/WiFiNetworkEvidence.swift" \
         "$host_dir/RFMonitor.swift" "$host_dir/RFDetectors.swift" \
-        "$host_dir/SerialLaunchConfiguration.swift" -o "$build_dir/NetworkScanner"
-elif [ "$app_id" = "rf-monitor" ]; then
-    swiftc -parse-as-library "$host_dir/$app_source" "$host_dir/RFDetectors.swift" \
         "$host_dir/SerialLaunchConfiguration.swift" -o "$build_dir/NetworkScanner"
 else
     swiftc -parse-as-library "$host_dir/$app_source" "$host_dir/FlockDetector.swift" \
