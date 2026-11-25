@@ -1156,6 +1156,11 @@ final class RFMonitor: ObservableObject {
                 status = "RTL-SDR not found by the P4. Reconnect it to the P4’s USB host port, then tap Listen."
                 return
             }
+            // The receiver driver stays in its FAULT state until recovery.
+            if event.code == 0x12A09 {
+                status = "RTL-SDR driver fault. Reopen RF Monitor from Sentinel Tools, then retry."
+                return
+            }
             status = wasReleasing ? "Could not release tuner (\(event.code ?? 0))"
                                    : mode == .adsb ? "ADS-B capture failed (\(event.code ?? 0))"
                                    : mode == .tetra ? "TETRA capture failed (\(event.code ?? 0))"
