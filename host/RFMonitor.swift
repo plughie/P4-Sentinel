@@ -1151,6 +1151,11 @@ final class RFMonitor: ObservableObject {
             running = false
             stopping = false
             audioOutput.stop()
+            // ESP-IDF ESP_ERR_NOT_FOUND means the P4 could not find the receiver.
+            if !wasReleasing, mode == .p25, event.code == 0x105 {
+                status = "RTL-SDR not found by the P4. Reconnect it to the P4’s USB host port, then tap Listen."
+                return
+            }
             status = wasReleasing ? "Could not release tuner (\(event.code ?? 0))"
                                    : mode == .adsb ? "ADS-B capture failed (\(event.code ?? 0))"
                                    : mode == .tetra ? "TETRA capture failed (\(event.code ?? 0))"
